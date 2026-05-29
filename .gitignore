@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.venv/
+env/
+
+# Datos sensibles / outputs
+evaluaciones.json
+Evaluaciones_TVIII.xlsx
+Archivos drive estructura.png
+Hackathon 290526.pptx
+1AAR0301_TVIII - Arquitectura y Ciudad_202610.pdf
+
+# PDFs de alumnos (datos privados)
+Planos/
+
+# OS
+.DS_Store
+Thumbs.db

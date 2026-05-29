@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Evaluador de Planos · TVIII</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @keyframes slideUp {
+      from { opacity:0; transform:translateY(16px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+    .slide-up { animation: slideUp 0.35s ease-out forwards; }
+
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .spin { animation: spin 0.8s linear infinite; }
+
+    @keyframes shimmer {
+      0%   { background-position:-400px 0; }
+      100% { background-position: 400px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg,#e2e8f0 25%,#f1f5f9 50%,#e2e8f0 75%);
+      background-size: 400px 100%;
+      animation: shimmer 1.4s ease-in-out infinite;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+/* ── Paleta niveles ── */
+const NIVEL = {
+  3:{ label:"Logrado",       ring:"ring-emerald-400", bg:"bg-emerald-50",  badge:"bg-emerald-500", text:"text-emerald-900", bar:"bg-emerald-500" },
+  2:{ label:"Suficiente",    ring:"ring-blue-400",    bg:"bg-blue-50",     badge:"bg-blue-500",    text:"text-blue-900",   bar:"bg-blue-500" },
+  1:{ label:"Insuficiente",  ring:"ring-amber-400",   bg:"bg-amber-50",    badge:"bg-amber-500",   text:"text-amber-900",  bar:"bg-amber-500" },
+  0:{ label:"No presentado", ring:"ring-red-300",     bg:"bg-red-50",      badge:"bg-red-500",     text:"text-red-900",    bar:"bg-red-400" },
+};
+const SEMANAS = [
+  {val:"4",  label:"Semana 4"},
+  {val:"8",  label:"Semana 8"},
+  {val:"12", label:"Semana 12"},
+  {val:"TF", label:"Final"},
+];
+
+/* ── Header ── */
+function Header() {
+  return (
+    <header className="bg-[#1F4E79] shadow-xl">
+      <div className="max-w-6xl mx-auto px-6 py-4 flex items-center gap-4">
+        <div className="w-11 h-11 rounded-xl bg-white flex items-center justify-center font-black text-[#1F4E79] text-xl select-none">A</div>
+        <div>
+          <h1 className="text-white text-xl font-bold tracking-tight">Evaluador de Planos Arquitectónicos</h1>
+          <p className="text-blue-300 text-sm">Taller VIII — Arquitectura y Ciudad · 202610</p>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/* ── Modal de confirmación ── */
+function ConfirmModal({ mensaje, onConfirm, onCancel }) {
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm mx-4 slide-up">
+        <div className="text-4xl mb-3 text-center">🔓</div>
+        <h3 className="font-bold text-slate-800 text-lg mb-2 text-center">Desbloquear evaluación</h3>
+        <p className="text-slate-600 text-sm text-center mb-5">{mensaje}</p>
+        <div className="flex gap-3">
+          <button onClick={onCancel}
+            className="flex-1 px-4 py-2 rounded-xl border border-slate-200 text-slate-600 font-semibold text-sm hover:bg-slate-50">
+            Cancelar
+          </button>
+          <button onClick={onConfirm}
+            className="flex-1 px-4 py-2 rounded-xl bg-red-500 text-white font-semibold text-sm hover:bg-red-600">
+            Sí, desbloquear
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Selector de semana con indicadores ── */
+function SemanaSelector({ semana, onChange, disabled, semanasMeta }) {
+  // semanasMeta: { "4": { guardada, locked, version }, ... }
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Entrega:</span>
+      {SEMANAS.map(o => {
+        const meta   = semanasMeta[o.val] || {};
+        const activa = semana === o.val;
+        return (
+          <button
+            key={o.val}
+            disabled={disabled}
+            onClick={() => onChange(o.val)}
+            className={`relative px-4 py-1.5 rounded-full text-sm font-semibold transition-all disabled:opacity-50 flex items-center gap-1 ${
+              activa
+                ? "bg-[#1F4E79] text-white shadow-md"
+                : meta.guardada && meta.locked
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100"
+                  : meta.guardada && !meta.locked
+                    ? "bg-amber-50 text-amber-700 border border-amber-300 hover:bg-amber-100"
+                    : "bg-white text-slate-500 border border-slate-200 hover:border-[#1F4E79] hover:text-[#1F4E79]"
+            }`}
+          >
+            {o.label}
+            {meta.guardada && meta.locked  && <span className="text-xs">🔒</span>}
+            {meta.guardada && !meta.locked && <span className="text-xs">🔓</span>}
+            {meta.version > 1 && (
+              <span className={`text-xs px-1 rounded font-bold ${activa ? "bg-white bg-opacity-30 text-white" : "bg-amber-200 text-amber-800"}`}>
+                v{meta.version}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── Drop zone ── */
+function DropZone({ archivo, onFile, disabled }) {
+  const [drag, setDrag] = useState(false);
+  const inputRef = useRef(null);
+  const handle = f => { if (f && f.type === "application/pdf") onFile(f); };
+
+  return (
+    <div
+      onDragOver={e => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={e => { e.preventDefault(); setDrag(false); handle(e.dataTransfer.files[0]); }}
+      onClick={() => !disabled && inputRef.current.click()}
+      className={`border-2 border-dashed rounded-2xl p-7 text-center transition-all select-none
+        ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}
+        ${drag ? "border-blue-500 bg-blue-50 scale-[1.01]" : ""}
+        ${archivo && !drag ? "border-emerald-400 bg-emerald-50" : ""}
+        ${!archivo && !drag ? "border-slate-300 bg-white hover:border-[#1F4E79] hover:bg-blue-50" : ""}
+      `}
+    >
+      <input ref={inputRef} type="file" accept=".pdf" className="hidden"
+        onChange={e => e.target.files[0] && handle(e.target.files[0])} />
+      <div className="text-4xl mb-2">{archivo ? "📄" : "📐"}</div>
+      {archivo ? (
+        <>
+          <p className="font-bold text-emerald-700 truncate max-w-xs mx-auto">{archivo.name}</p>
+          <p className="text-xs text-slate-500 mt-1">{(archivo.size/1024/1024).toFixed(1)} MB · clic para cambiar</p>
+        </>
+      ) : (
+        <>
+          <p className="font-semibold text-slate-700">Arrastra el PDF aquí</p>
+          <p className="text-xs text-slate-400 mt-1">o haz clic para seleccionar</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ── Badge de semana guardada con timestamp ── */
+function TimestampBadge({ ts }) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  const fmt = d.toLocaleDateString("es-CL", { day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit" });
+  return (
+    <span className="text-xs text-slate-400 flex items-center gap-1">
+      <span>💾</span> Guardado {fmt}
+    </span>
+  );
+}
+
+/* ── Barra de puntaje ── */
+function ScoreBar({ criterios, total_items }) {
+  const vals = Object.values(criterios);
+  if (!vals.length) return null;
+  const sum  = vals.reduce((a,c) => a + c.nivel, 0);
+  const max  = total_items * 3;
+  const pct  = max ? Math.round(sum / max * 100) : 0;
+  const col  = pct >= 80 ? "bg-emerald-500" : pct >= 60 ? "bg-amber-500" : "bg-red-500";
+  const tCol = pct >= 80 ? "text-emerald-600" : pct >= 60 ? "text-amber-600" : "text-red-600";
+  return (
+    <div className="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 slide-up">
+      <div className="flex justify-between items-end mb-3">
+        <div>
+          <span className="text-3xl font-black text-slate-800">{sum}</span>
+          <span className="text-slate-400 text-lg"> / {max} pts</span>
+          <p className="text-xs text-slate-400 mt-0.5">{vals.length}/{total_items} criterios evaluados</p>
+        </div>
+        <span className={`text-4xl font-black ${tCol}`}>{pct}%</span>
+      </div>
+      <div className="h-4 bg-slate-100 rounded-full overflow-hidden">
+        <div className={`h-full rounded-full transition-all duration-700 ${col}`} style={{width:`${pct}%`}}/>
+      </div>
+      <div className="flex gap-4 mt-3 flex-wrap">
+        {[3,2,1,0].map(n => {
+          const c = vals.filter(v => v.nivel === n).length;
+          return c > 0 ? (
+            <span key={n} className="flex items-center gap-1.5 text-xs text-slate-500">
+              <span className={`w-2 h-2 rounded-full ${NIVEL[n].bar}`}/>
+              {c} {NIVEL[n].label}
+            </span>
+          ) : null;
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ── Tarjeta criterio ── */
+function CriterioCard({ item, ev: evData, delay }) {
+  const [expandido, setExpandido] = useState(false);
+
+  if (!evData) {
+    return (
+      <div className="bg-white rounded-xl p-4 border border-slate-100 opacity-40">
+        <div className="flex gap-3 items-start">
+          <div className="w-8 h-8 rounded-lg skeleton flex-shrink-0"/>
+          <div className="flex-1 space-y-2">
+            <div className="skeleton h-2 w-3/4"/>
+            <div className="skeleton h-2 w-full"/>
+            <div className="skeleton h-2 w-1/2"/>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const cfg = NIVEL[evData.nivel] ?? NIVEL[0];
+  const tieneEvidencia = evData.evidencia && evData.evidencia.trim().length > 0;
+
+  return (
+    <div
+      className={`rounded-xl p-4 ring-1 ${cfg.ring} ${cfg.bg} slide-up`}
+      style={{ animationDelay:`${delay*0.04}s` }}
+    >
+      <div className="flex gap-3 items-start">
+        <div className={`w-8 h-8 rounded-lg ${cfg.badge} flex items-center justify-center text-white font-bold text-sm flex-shrink-0`}>
+          {item.id}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full bg-white bg-opacity-70 ${cfg.text}`}>
+              {cfg.label}
+            </span>
+            <span className="text-xs text-slate-500">{evData.cumple ? "✓ Cumple" : "✗ No cumple"}</span>
+          </div>
+          <p className={`text-sm font-semibold ${cfg.text} leading-snug mb-1`}>
+            {item.checklist.length > 85 ? item.checklist.slice(0,85)+"…" : item.checklist}
+          </p>
+          <p className="text-xs text-slate-600 leading-relaxed">{evData.feedback}</p>
+
+          {/* Evidencia visual (lo que Claude vio) */}
+          {tieneEvidencia && (
+            <div className="mt-2">
+              <button
+                onClick={() => setExpandido(e => !e)}
+                className="flex items-center gap-1 text-xs text-slate-400 hover:text-slate-600 transition-colors"
+              >
+                <span>{expandido ? "▾" : "▸"}</span>
+                <span className="font-medium">Evidencia visual</span>
+              </button>
+              {expandido && (
+                <div className="mt-1.5 px-2 py-1.5 bg-white bg-opacity-60 rounded-lg border border-white border-opacity-80">
+                  <p className="text-xs text-slate-500 italic leading-relaxed">
+                    🔍 {evData.evidencia}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Resumen ── */
+function ResumenCard({ data }) {
+  if (!data) return null;
+  return (
+    <div className="bg-gradient-to-br from-[#1F4E79] to-[#2E75B6] text-white rounded-2xl p-6 shadow-xl slide-up col-span-full">
+      <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><span className="text-xl">📋</span> Evaluación General</h3>
+      <div className="grid md:grid-cols-3 gap-4">
+        {[
+          {icon:"✅", col:"text-emerald-300", title:"Fortalezas",      key:"fortalezas"},
+          {icon:"⚠️", col:"text-amber-300",   title:"Áreas de mejora", key:"areas_mejora"},
+          {icon:"💬", col:"text-blue-200",    title:"Comentario",      key:"comentario_general"},
+        ].map(s => (
+          <div key={s.key} className="bg-white bg-opacity-10 rounded-xl p-4">
+            <h4 className={`${s.col} font-bold text-sm mb-2`}>{s.icon} {s.title}</h4>
+            <p className="text-blue-100 text-sm leading-relaxed">{data[s.key]}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Panel lateral: historial de evaluaciones ── */
+function HistorialPanel({ historial, archivoActual, onSelect }) {
+  const entries = Object.entries(historial);
+  if (!entries.length) return null;
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-4">
+      <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wide mb-3">Evaluaciones guardadas</h2>
+      <div className="space-y-1 max-h-72 overflow-y-auto">
+        {entries.map(([archivo, datos]) => {
+          const semanas = Object.keys(datos.semanas || {});
+          const activo  = archivo === archivoActual;
+          return (
+            <button
+              key={archivo}
+              onClick={() => onSelect(archivo, datos)}
+              className={`w-full text-left px-3 py-2.5 rounded-xl transition-all ${
+                activo ? "bg-[#1F4E79] text-white" : "hover:bg-slate-50 text-slate-700"
+              }`}
+            >
+              <p className="text-sm font-semibold truncate">{datos.alumno || archivo}</p>
+              <div className="flex gap-1 mt-1">
+                {SEMANAS.map(s => (
+                  <span key={s.val}
+                    className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                      semanas.includes(s.val)
+                        ? activo ? "bg-emerald-400 text-white" : "bg-emerald-100 text-emerald-700"
+                        : activo ? "bg-white bg-opacity-20 text-white opacity-50" : "bg-slate-100 text-slate-400"
+                    }`}
+                  >
+                    {s.val === "TF" ? "TF" : `S${s.val}`}
+                    {semanas.includes(s.val) && " ✓"}
+                  </span>
+                ))}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   App principal
+══════════════════════════════════════════════════════════════ */
+function App() {
+  const [semana,        setSemana]        = useState("4");
+  const [rubrica,       setRubrica]       = useState([]);
+  const [archivo,       setArchivo]       = useState(null);
+  const [archivoNombre, setArchivoNombre] = useState("");
+  const [estado,        setEstado]        = useState("idle");
+  const [progreso,      setProgreso]      = useState("");
+  const [criterios,     setCriterios]     = useState({});
+  const [resumen,       setResumen]       = useState(null);
+  const [errorMsg,      setErrorMsg]      = useState("");
+  const [historial,     setHistorial]     = useState({});
+  const [tsActual,      setTsActual]      = useState(null);
+  const [versionActual, setVersionActual] = useState(null);
+  const [confirmModal,  setConfirmModal]  = useState(false);
+
+  const recargarHistorial = useCallback(async () => {
+    const h = await fetch("/evaluaciones").then(r => r.json()).catch(() => ({}));
+    setHistorial(h);
+    return h;
+  }, []);
+
+  /* Cargar historial al inicio */
+  useEffect(() => { recargarHistorial(); }, []);
+
+  /* Cargar rúbrica cuando cambia semana */
+  useEffect(() => {
+    fetch(`/rubrica?semana=${semana}`)
+      .then(r => r.json()).then(setRubrica).catch(console.error);
+  }, [semana]);
+
+  /* Cuando cambia semana o archivo → intentar cargar eval guardada */
+  useEffect(() => {
+    if (!archivoNombre) return;
+    const evalGuardada = historial[archivoNombre]?.semanas?.[semana];
+    if (evalGuardada) {
+      setCriterios(evalGuardada.criterios || {});
+      setResumen(evalGuardada.resumen || null);
+      setTsActual(evalGuardada.timestamp || null);
+      setVersionActual(evalGuardada.version || 1);
+      setEstado("completo");
+      setProgreso("Evaluación cargada desde historial");
+    } else {
+      setCriterios({});
+      setResumen(null);
+      setTsActual(null);
+      setVersionActual(null);
+      setEstado("idle");
+      setProgreso("");
+    }
+  }, [semana, archivoNombre, historial]);
+
+  const handleArchivo = useCallback((f) => {
+    setArchivo(f);
+    setArchivoNombre(f.name);
+    setCriterios({});
+    setResumen(null);
+    setTsActual(null);
+    setVersionActual(null);
+    setEstado("idle");
+    setProgreso("");
+    setErrorMsg("");
+  }, []);
+
+  const handleSeleccionHistorial = useCallback((nombre) => {
+    setArchivo(null);
+    setArchivoNombre(nombre);
+    setEstado("idle");
+    setProgreso("");
+    setErrorMsg("");
+  }, []);
+
+  /* Guardar en backend */
+  const guardar = useCallback(async (crit, res, semanaG) => {
+    if (!archivoNombre) return null;
+    const alumno = archivoNombre.replace(/\s*\d+\.pdf$/i, "").replace(/\.pdf$/i, "");
+    const resp = await fetch("/guardar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archivo: archivoNombre, alumno, semana: semanaG, criterios: crit, resumen: res }),
+    }).then(r => r.json()).catch(() => null);
+    await recargarHistorial();
+    return resp;
+  }, [archivoNombre, recargarHistorial]);
+
+  /* Desbloquear evaluación */
+  const desbloquear = useCallback(async () => {
+    await fetch("/desbloquear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archivo: archivoNombre, semana }),
+    });
+    await recargarHistorial();
+    setConfirmModal(false);
+  }, [archivoNombre, semana, recargarHistorial]);
+
+  /* Evaluar ── streaming ── */
+  const procesando = estado === "procesando";
+
+  const evaluar = useCallback(async () => {
+    if (!archivo || procesando) return;
+    setEstado("procesando");
+    setCriterios({});
+    setResumen(null);
+    setTsActual(null);
+    setVersionActual(null);
+    setErrorMsg("");
+    setProgreso("Iniciando…");
+
+    const fd = new FormData();
+    fd.append("file", archivo);
+    fd.append("semana", semana);
+
+    const critAcum = {};
+    let resAcum = null;
+
+    try {
+      const fetchRes = await fetch("/evaluar", { method:"POST", body:fd });
+      if (!fetchRes.ok) throw new Error(`HTTP ${fetchRes.status}`);
+
+      const reader  = fetchRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream:true });
+        const lines = buf.split("\n");
+        buf = lines[lines.length - 1];
+        for (const line of lines.slice(0,-1)) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if      (ev.tipo === "progreso") { setProgreso(ev.msg); }
+            else if (ev.tipo === "rubrica")  { setRubrica(ev.items); }
+            else if (ev.tipo === "criterio") {
+              critAcum[ev.id] = ev;
+              setCriterios(p => ({ ...p, [ev.id]: ev }));
+              setProgreso(`Criterio ${ev.id} evaluado…`);
+            }
+            else if (ev.tipo === "resumen") { resAcum = ev; setResumen(ev); setProgreso("Generando resumen…"); }
+            else if (ev.tipo === "fin") {
+              setEstado("completo");
+              setProgreso("Guardando evaluación…");
+              const saved = await guardar(critAcum, resAcum, semana);
+              const version = saved?.version ?? 1;
+              setVersionActual(version);
+              setTsActual(new Date().toISOString());
+              setProgreso(version > 1
+                ? `Re-evaluación v${version} guardada y bloqueada 🔒`
+                : "Evaluación guardada y bloqueada 🔒");
+            }
+            else if (ev.tipo === "error") { setErrorMsg(ev.msg); setEstado("error"); }
+          } catch(_) {}
+        }
+      }
+    } catch(e) {
+      setErrorMsg(e.message);
+      setEstado("error");
+    }
+  }, [archivo, semana, procesando, guardar]);
+
+  /* Metadata de semanas para el selector */
+  const semanasMeta = SEMANAS.reduce((acc, s) => {
+    const datos = historial[archivoNombre]?.semanas?.[s.val];
+    acc[s.val] = datos
+      ? { guardada: true, locked: datos.locked ?? true, version: datos.version ?? 1 }
+      : { guardada: false, locked: false, version: 0 };
+    return acc;
+  }, {});
+
+  const metaActual      = semanasMeta[semana] || {};
+  const estaGuardada    = metaActual.guardada;
+  const estaBloqueada   = metaActual.locked;
+  const mostrarResultados = Object.keys(criterios).length > 0 || resumen;
+
+  /* Determinar estado del botón evaluar */
+  const puedeEvaluar = archivo && !procesando && (!estaGuardada || !estaBloqueada);
+
+  return (
+    <div className="min-h-screen bg-slate-100">
+      {confirmModal && (
+        <ConfirmModal
+          mensaje={`Esto permitirá re-evaluar la Semana ${semana} de "${archivoNombre}". ¿Seguro? Quedará registrado como v${(metaActual.version||1)+1}.`}
+          onConfirm={desbloquear}
+          onCancel={() => setConfirmModal(false)}
+        />
+      )}
+
+      <Header/>
+
+      <main className="max-w-6xl mx-auto px-4 py-8">
+        <div className="grid lg:grid-cols-4 gap-6">
+
+          {/* ── Historial lateral ── */}
+          <div className="lg:col-span-1 space-y-4">
+            <HistorialPanel
+              historial={historial}
+              archivoActual={archivoNombre}
+              onSelect={handleSeleccionHistorial}
+            />
+          </div>
+
+          {/* ── Panel principal ── */}
+          <div className="lg:col-span-3 space-y-5">
+
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-6 space-y-4">
+              <SemanaSelector
+                semana={semana}
+                onChange={s => { setSemana(s); setArchivo(null); setErrorMsg(""); setProgreso(""); }}
+                disabled={procesando}
+                semanasMeta={semanasMeta}
+              />
+
+              <div className="grid sm:grid-cols-2 gap-4 items-start">
+                <div className="space-y-2">
+                  <p className="text-sm font-semibold text-slate-700">
+                    {rubrica.length} criterios · Semana {semana}
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {rubrica.map(it => (
+                      <span key={it.id} className={`text-xs px-2 py-0.5 rounded-full font-medium transition-all ${
+                        criterios[it.id]
+                          ? `${NIVEL[criterios[it.id].nivel].badge} text-white`
+                          : "bg-slate-100 text-slate-500"
+                      }`}>C{it.id}</span>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs pt-1">
+                    {[3,2,1,0].map(n => (
+                      <span key={n} className="flex items-center gap-1 text-slate-400">
+                        <span className={`w-2 h-2 rounded-full ${NIVEL[n].bar}`}/>{NIVEL[n].label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <DropZone archivo={archivo} onFile={handleArchivo} disabled={procesando}/>
+              </div>
+
+              {/* ── Banner "BLOQUEADO" ── */}
+              {estaGuardada && estaBloqueada && (
+                <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🔒</span>
+                    <div>
+                      <p className="text-sm font-bold text-emerald-800">
+                        Evaluación oficial — Semana {semana}
+                        {metaActual.version > 1 && <span className="ml-2 text-xs bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded font-bold">v{metaActual.version}</span>}
+                      </p>
+                      <TimestampBadge ts={tsActual}/>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setConfirmModal(true)}
+                    disabled={!archivo}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-slate-300 text-slate-500 hover:border-red-300 hover:text-red-600 hover:bg-red-50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                    title={!archivo ? "Sube el PDF para poder re-evaluar" : ""}
+                  >
+                    🔓 Desbloquear para re-evaluar
+                  </button>
+                </div>
+              )}
+
+              {/* ── Banner "DESBLOQUEADO" ── */}
+              {estaGuardada && !estaBloqueada && (
+                <div className="flex items-center gap-3 bg-amber-50 border border-amber-300 rounded-xl px-4 py-3">
+                  <span className="text-xl">🔓</span>
+                  <p className="text-sm font-semibold text-amber-800">
+                    Desbloqueado — puedes re-evaluar con el PDF actualizado del alumno.
+                  </p>
+                </div>
+              )}
+
+              {/* ── Botón evaluar + estado ── */}
+              <div className="flex items-center gap-4 flex-wrap">
+                <button
+                  onClick={evaluar}
+                  disabled={!puedeEvaluar}
+                  className={`px-6 py-2.5 rounded-xl font-bold text-sm transition-all flex items-center gap-2 shadow ${
+                    !puedeEvaluar
+                      ? "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
+                      : !estaGuardada
+                        ? "bg-[#1F4E79] text-white hover:bg-[#2E75B6] hover:shadow-lg"
+                        : "bg-amber-500 text-white hover:bg-amber-600 hover:shadow-lg"
+                  }`}
+                >
+                  {procesando ? (
+                    <><span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full spin"/>Evaluando…</>
+                  ) : !estaGuardada ? (
+                    <><span>⚡</span> Evaluar Plano</>
+                  ) : (
+                    <><span>🔄</span> Re-evaluar (v{(metaActual.version||0)+1})</>
+                  )}
+                </button>
+
+                <div className="flex flex-col gap-0.5">
+                  {(procesando || (estado === "completo" && progreso)) && (
+                    <span className="text-sm text-slate-500 flex items-center gap-2">
+                      {procesando && <span className="w-2 h-2 bg-blue-500 rounded-full spin"/>}
+                      {progreso}
+                    </span>
+                  )}
+                  {estado === "error" && (
+                    <span className="text-sm text-red-600 font-medium">⚠ {errorMsg}</span>
+                  )}
+                </div>
+              </div>
+
+              {!archivo && archivoNombre && (
+                <p className="text-xs text-slate-400 bg-slate-50 rounded-lg px-3 py-2">
+                  ℹ️ Mostrando evaluación guardada de <strong>{archivoNombre}</strong>. Sube el PDF para re-evaluar.
+                </p>
+              )}
+            </div>
+
+            {/* Barra de puntaje */}
+            {mostrarResultados && (
+              <ScoreBar criterios={criterios} total_items={rubrica.length}/>
+            )}
+
+            {/* Grid criterios */}
+            {(mostrarResultados || (procesando && rubrica.length > 0)) && (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {rubrica.map((item,i) => (
+                  <CriterioCard key={item.id} item={item} ev={criterios[item.id]||null} delay={i}/>
+                ))}
+                {resumen && <ResumenCard data={resumen}/>}
+              </div>
+            )}
+
+            {estado === "idle" && !mostrarResultados && (
+              <div className="text-center py-16 text-slate-400">
+                <p className="text-5xl mb-4">🏛️</p>
+                <p className="font-semibold text-lg text-slate-500">Sube un PDF y presiona Evaluar</p>
+                <p className="text-sm mt-1">La evaluación se guarda y bloquea automáticamente al finalizar</p>
+              </div>
+            )}
+
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
