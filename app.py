@@ -56,6 +56,14 @@ def pdf_a_b64(pdf_bytes: bytes) -> str:
     doc.close()
     return b64
 
+def es_manuscrito(pdf_bytes: bytes) -> bool:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc[0]
+    text = page.get_text().strip()
+    n_images = len(page.get_images(full=True))
+    doc.close()
+    return len(text) < 200 or n_images >= 1
+
 # ── Persistencia ─────────────────────────────────────────────
 def _load() -> dict:
     if EVAL_FILE.exists():
@@ -139,15 +147,24 @@ async def evaluar(file: UploadFile = File(...), semana: str = Form("4")):
 
             yield ev({"tipo": "progreso", "msg": "Renderizando imagen…"})
             img_b64 = pdf_a_b64(pdf_bytes)
+            manuscrito = es_manuscrito(pdf_bytes)
 
             rubrica     = cargar_rubrica(semana)
             rubrica_map = {it["id"]: it for it in rubrica}
             yield ev({"tipo": "rubrica", "items": rubrica})
-            yield ev({"tipo": "progreso", "msg": f"Enviando a Claude Vision ({len(rubrica)} criterios)…"})
+            tipo_plano = "manuscrito/escaneado" if manuscrito else "digital"
+            yield ev({"tipo": "progreso", "msg": f"Enviando a Claude Vision ({len(rubrica)} criterios, plano {tipo_plano})…"})
 
             criterios_txt = "\n".join(f"{it['id']}. {it['checklist']}" for it in rubrica)
 
-            prompt = f"""Analiza VISUALMENTE este plano de Taller de Arquitectura, Semana {semana}.
+            nota_manuscrito = (
+                "\nNOTA: Este es un PLANO DIBUJADO A MANO (manuscrito/escaneado). "
+                "Evalúa con flexibilidad los trazos y anotaciones handmade. "
+                "Cita exactamente lo que ves aunque sea impreciso o informal."
+                if manuscrito else ""
+            )
+
+            prompt = f"""Analiza VISUALMENTE este plano de Taller de Arquitectura, Semana {semana}.{nota_manuscrito}
 
 INSTRUCCION CRITICA: evalua SOLO lo que observas directamente. Cita elementos visuales concretos.
 Si algo no es visible, nivel=0. NO asumas ni inventes.
@@ -216,19 +233,6 @@ Ultima linea: {{"tipo":"resumen","fortalezas":"...","areas_mejora":"...","coment
                         obj["dimension"]  = item.get("dimension", "")
                     yield ev(obj)
                 except json.JSONDecodeError:
-                    pass
-
-            # flush buffer
-            if buffer.strip():
-                try:
-                    obj = json.loads(buffer.strip())
-                    if "tipo" not in obj:
-                        obj["tipo"] = "criterio"
-                        item = rubrica_map.get(obj.get("id"), {})
-                        obj["checklist"] = item.get("checklist", "")
-                        obj["dimension"]  = item.get("dimension", "")
-                    yield ev(obj)
-                except Exception:
                     pass
 
             yield ev({"tipo": "fin"})
