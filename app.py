@@ -129,7 +129,10 @@ async def evaluar(file: UploadFile = File(...), semana: str = Form("4")):
     def ev(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+    KEEPALIVE = ": keep-alive\n\n"   # comentario SSE, no dispara eventos en el cliente
+
     async def stream():
+        import asyncio
         try:
             yield ev({"tipo": "progreso", "msg": "Leyendo PDF…"})
             pdf_bytes = await file.read()
@@ -137,80 +140,83 @@ async def evaluar(file: UploadFile = File(...), semana: str = Form("4")):
             yield ev({"tipo": "progreso", "msg": "Renderizando imagen…"})
             img_b64 = pdf_a_b64(pdf_bytes)
 
-            rubrica = cargar_rubrica(semana)
+            rubrica     = cargar_rubrica(semana)
+            rubrica_map = {it["id"]: it for it in rubrica}
             yield ev({"tipo": "rubrica", "items": rubrica})
-            yield ev({"tipo": "progreso", "msg": f"Evaluando {len(rubrica)} criterios con Claude…"})
+            yield ev({"tipo": "progreso", "msg": f"Enviando a Claude Vision ({len(rubrica)} criterios)…"})
 
-            criterios_txt = "\n".join(
-                f"{it['id']}. {it['checklist']}" for it in rubrica
-            )
+            criterios_txt = "\n".join(f"{it['id']}. {it['checklist']}" for it in rubrica)
 
-            prompt = f"""Analiza VISUALMENTE este plano/documento de Taller de Arquitectura, Semana {semana}.
+            prompt = f"""Analiza VISUALMENTE este plano de Taller de Arquitectura, Semana {semana}.
 
-INSTRUCCION CRITICA: Debes evaluar SOLO lo que puedes observar directamente en la imagen.
-Para cada criterio DEBES citar un elemento visual concreto que observas (o confirmar su ausencia).
-NO asumas ni inferas lo que no ves. Si un elemento no es visible, nivel=0.
+INSTRUCCION CRITICA: evalua SOLO lo que observas directamente. Cita elementos visuales concretos.
+Si algo no es visible, nivel=0. NO asumas ni inventes.
 
-CRITERIOS ({len(rubrica)} en total):
+CRITERIOS ({len(rubrica)}):
 {criterios_txt}
 
-ESCALA:
-0 = No presentado (no visible en el documento)
-1 = Insuficiente (presente pero incompleto o incorrecto)
-2 = Suficiente (cumple requisitos mínimos, claramente visible)
-3 = Logrado (cumple con solidez, bien desarrollado y visible)
+ESCALA: 0=No presentado | 1=Insuficiente | 2=Suficiente | 3=Logrado
 
-Responde SOLO en formato NDJSON (un objeto JSON por linea, sin texto adicional):
+Responde SOLO NDJSON (un JSON por linea, sin texto extra):
+Lineas 1-{len(rubrica)}: {{"id":1,"cumple":true,"nivel":3,"evidencia":"elemento visual concreto observado","feedback":"comentario"}}
+Ultima linea: {{"tipo":"resumen","fortalezas":"...","areas_mejora":"...","comentario_general":"..."}}"""
 
-Lineas 1-{len(rubrica)} — un criterio por linea con este formato EXACTO:
-{{"id":1,"cumple":true,"nivel":3,"evidencia":"[CITA VISUAL] Describe exactamente qué elemento del plano justifica el puntaje, ej: diagrama de rosa de vientos en esquina superior derecha, análisis solar con tabla de irradiación mensual visible","feedback":"comentario evaluativo para el alumno"}}
+            client = anthropic.AsyncAnthropic(api_key=API_KEY)
 
-Ultima linea — resumen:
-{{"tipo":"resumen","fortalezas":"aspectos positivos concretos observados","areas_mejora":"elementos ausentes o deficientes concretos","comentario_general":"evaluación global"}}"""
+            # ── Llamada a Claude + keep-alive concurrente ──────────────
+            # Railway bufferiza SSE, así que llamamos sin streaming y
+            # mandamos pings cada 3s para que no corte la conexión.
+            done_event = asyncio.Event()
 
-            client  = anthropic.AsyncAnthropic(api_key=API_KEY)
-            buffer  = ""
-            rubrica_map = {it["id"]: it for it in rubrica}
+            async def keepalive_loop():
+                while not done_event.is_set():
+                    await asyncio.sleep(3)
 
-            async with client.messages.stream(
-                model=MODEL,
-                max_tokens=4000,
-                system=(
-                    "Eres un evaluador experto en arquitectura universitaria con 15 años de experiencia. "
-                    "Evalúas trabajos de Taller VIII (Arquitectura y Ciudad) de forma estricta y objetiva. "
-                    "REGLA FUNDAMENTAL: solo evalúas lo que observas directamente en la imagen. "
-                    "Nunca asumas la presencia de elementos que no puedes ver claramente. "
-                    "Responde siempre en español y en formato NDJSON estricto: un JSON por linea."
-                ),
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }],
-            ) as s:
-                async for chunk in s.text_stream:
-                    buffer += chunk
-                    lines   = buffer.split("\n")
-                    buffer  = lines[-1]
-                    for line in lines[:-1]:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                            if "tipo" not in obj:   # criterio
-                                obj["tipo"] = "criterio"
-                                item = rubrica_map.get(obj.get("id"), {})
-                                obj["checklist"] = item.get("checklist", "")
-                                obj["dimension"]  = item.get("dimension", "")
-                            yield ev(obj)
-                        except json.JSONDecodeError:
-                            pass
+            # Tarea paralela de keep-alive
+            ka_task = asyncio.create_task(keepalive_loop())
+
+            # Claude call (no-stream, espera respuesta completa)
+            try:
+                msg = await client.messages.create(
+                    model=MODEL,
+                    max_tokens=4000,
+                    system=(
+                        "Eres evaluador experto en arquitectura universitaria. "
+                        "Evalúas Taller VIII (Arquitectura y Ciudad). "
+                        "Solo evalúas lo que observas en la imagen. "
+                        "Responde en español y en formato NDJSON estricto."
+                    ),
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                            {"type": "text",  "text": prompt},
+                        ],
+                    }],
+                )
+            finally:
+                done_event.set()
+                ka_task.cancel()
+
+            # Mandamos keep-alive real mientras esperábamos (yield)
+            yield KEEPALIVE
+
+            # ── Parsear y emitir criterios uno a uno ──────────────────
+            raw = msg.content[0].text.strip()
+            for line in raw.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if "tipo" not in obj:
+                        obj["tipo"] = "criterio"
+                        item = rubrica_map.get(obj.get("id"), {})
+                        obj["checklist"] = item.get("checklist", "")
+                        obj["dimension"]  = item.get("dimension", "")
+                    yield ev(obj)
+                except json.JSONDecodeError:
+                    pass
 
             # flush buffer
             if buffer.strip():
